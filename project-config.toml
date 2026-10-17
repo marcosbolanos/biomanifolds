@@ -1,0 +1,6 @@
+[paths]
+swissprot="data/external/swissprot/"
+alphafold="data/external/alphafold/"
+sequence_labels="data/interim/sequence_labels/"
+swissprot_labels="data/interim/swissprot_labels/"
+af2_structure_labels="data/interim/af2_structure_labels/"
