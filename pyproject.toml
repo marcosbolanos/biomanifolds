@@ -7,9 +7,22 @@ requires-python = ">=3.12"
 dependencies = [
     "biotite>=1.8.0",
     "matplotlib>=3.11.2",
+    "plotly>=7.1.0",
     "polars>=2.0.0",
     "pymmseqs>=1.2.0",
+    "scipy>=1.18.1",
     "tqdm>=4.70.1",
+    "transformers==5.19.0",
+]
+
+# torch for the GPU of the machine: `uv sync --extra rocm` (AMD) or `uv sync --extra cuda` (NVIDIA)
+[project.optional-dependencies]
+rocm = [
+    "torch>=2.6",
+    "triton-rocm; sys_platform == 'linux'",  # ROCm torch dependency, from the pytorch-rocm index
+]
+cuda = [
+    "torch>=2.6",
 ]
 
 [build-system]
@@ -21,3 +34,23 @@ dev = [
     "ipykernel>=7.4.0",
     "jupyter>=1.1.1",
 ]
+
+[tool.uv]
+conflicts = [[{ extra = "rocm" }, { extra = "cuda" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-rocm", extra = "rocm" },
+    { index = "pytorch-cuda", extra = "cuda" },
+]
+triton-rocm = [{ index = "pytorch-rocm", extra = "rocm" }]
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
