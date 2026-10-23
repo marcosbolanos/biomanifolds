@@ -2,13 +2,15 @@
 
 The embedding of a residue at layer L is the output of layer L (the residual stream, before the
 final layer norm), computed in float32 and saved as float16. Row r of each output .npy is residue
-r of the concatenated sequences, in the given order. Several layers are computed in one pass.
+r of the concatenated sequences, in the given order (with `positions`: only the given residues of
+each sequence, in the given order). Several layers are computed in one pass.
 
 Also runs as a script, e.g. on a GPU machine with only numpy, polars, torch and transformers:
 
     python embed_sequences.py proteins.parquet embeddings_L{layer}.npy --layers 18 28 30
 
-where proteins.parquet has a `sequence` column and {layer} in the output name is replaced by each layer.
+where proteins.parquet has a `sequence` column (and optionally a `positions` column: list of the
+residues to keep) and {layer} in the output name is replaced by each layer.
 """
 
 import numpy as np
@@ -16,8 +18,9 @@ import numpy as np
 MODEL = "facebook/esm2_t30_150M_UR50D"
 
 
-def embed_sequences(sequences, out_paths, max_tokens=16384, device=None):
-    """`out_paths`: {layer: path of the .npy for that layer}."""
+def embed_sequences(sequences, out_paths, max_tokens=16384, device=None, positions=None):
+    """`out_paths`: {layer: path of the .npy for that layer}. `positions`: for each sequence, the 0-based
+    residues to keep (default: all)."""
     import torch
     from transformers import AutoTokenizer, EsmModel
 
@@ -32,7 +35,8 @@ def embed_sequences(sequences, out_paths, max_tokens=16384, device=None):
             lambda _module, _input, output, layer=layer: captured.__setitem__(layer, output[0] if isinstance(output, tuple) else output))
 
     lengths = np.array([len(s) for s in sequences])
-    starts = np.r_[0, np.cumsum(lengths)]  # rows of sequence j: starts[j] .. starts[j + 1]
+    kept = [np.arange(n) for n in lengths] if positions is None else [np.asarray(p, dtype=np.int64) for p in positions]
+    starts = np.r_[0, np.cumsum([len(k) for k in kept])]  # rows of sequence j: starts[j] .. starts[j + 1]
     tmp_paths = {layer: path.with_name(path.stem + ".tmp.npy") for layer, path in out_paths.items()}
     outs = {layer: np.lib.format.open_memmap(tmp, mode="w+", dtype=np.float16, shape=(int(starts[-1]), model.config.hidden_size))
             for layer, tmp in tmp_paths.items()}
@@ -54,7 +58,7 @@ def embed_sequences(sequences, out_paths, max_tokens=16384, device=None):
             for layer, out in outs.items():
                 x = captured[layer].half().cpu().numpy()  # (batch, tokens, hidden)
                 for b, j in enumerate(batch):
-                    out[starts[j]:starts[j + 1]] = x[b, 1:lengths[j] + 1]  # token 0 is <cls>
+                    out[starts[j]:starts[j + 1]] = x[b, kept[j] + 1]  # token 0 is <cls>
             if k % 100 == 0:
                 print(f"batch {k}/{len(batches)}", flush=True)
     for layer, out in outs.items():
@@ -77,5 +81,6 @@ if __name__ == "__main__":
     parser.add_argument("--layers", type=int, nargs="+", default=[18])
     parser.add_argument("--max-tokens", type=int, default=16384)
     args = parser.parse_args()
-    embed_sequences(pl.read_parquet(args.proteins)["sequence"].to_list(),
-                    {layer: Path(args.out.format(layer=layer)) for layer in args.layers}, args.max_tokens)
+    proteins = pl.read_parquet(args.proteins)
+    embed_sequences(proteins["sequence"].to_list(), {layer: Path(args.out.format(layer=layer)) for layer in args.layers}, args.max_tokens,
+                    positions=proteins["positions"].to_list() if "positions" in proteins.columns else None)

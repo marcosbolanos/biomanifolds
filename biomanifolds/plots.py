@@ -15,12 +15,12 @@ def _stacked_bars(ax, groups, y, column, categories, colors, title):
         ax.barh(y, fractions, left=left, color=color, label=category)
         for yi, start, fraction in zip(y, left, fractions):
             if fraction >= 0.05:
-                ax.text(start + fraction / 2, yi, f"{fraction:.0%}", ha="center", va="center", fontsize=8)
+                ax.text(start + fraction / 2, yi, f"{fraction:.0%}", ha="center", va="center", fontsize="small")
         left += fractions
     ax.set_xlim(0, 1)
     ax.set_xlabel("fraction of proteins")
     ax.set_title(title)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=4, frameon=False, fontsize=8)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=4, frameon=False, fontsize="small")  # below the x label
 
 
 def protein_summary(groups: dict[str, pl.DataFrame], max_length=1022):
@@ -32,7 +32,7 @@ def protein_summary(groups: dict[str, pl.DataFrame], max_length=1022):
     y = np.arange(len(groups))[::-1]
 
     fig = plt.figure(figsize=(14, 4 + 1.5 * len(groups)))
-    grid = fig.add_gridspec(2, 2, height_ratios=[1.2, 1], hspace=0.35, wspace=0.05)
+    grid = fig.add_gridspec(2, 2, height_ratios=[1.2, 1], hspace=0.35, wspace=0.08)  # room between the "1.0" and "0.0" ticks of 2a and 2b
 
     # 1. Sequence length
     ax = fig.add_subplot(grid[0, :])
@@ -58,7 +58,7 @@ def protein_summary(groups: dict[str, pl.DataFrame], max_length=1022):
     # 2a. Kingdom
     ax = fig.add_subplot(grid[1, 0])
     _stacked_bars(ax, groups, y, "kingdom", KINGDOMS, plt.cm.Set2([0, 2, 4, 6, 7]), "2a. Kingdom")
-    ax.set_yticks(y, labels, fontsize=8)
+    ax.set_yticks(y, labels, fontsize="small")
 
     # 2b. Major groups
     ax = fig.add_subplot(grid[1, 1])
