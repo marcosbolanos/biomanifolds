@@ -1,0 +1,10 @@
+# ESM-2, 12 layers, hidden size 480. layers: about 3/5 of the depth, the second-to-last and the last layer; ablation: the last two
+name = "esm2_t12_35M"
+hf_id = "facebook/esm2_t12_35M_UR50D"
+adapter = "esm2"
+layers = [7, 11, 12]  # bins and PCA (notebook 2)
+ablation_layers = [11, 12]  # ablation (notebook 3)
+steering_layer = 12  # steering (notebook 5)
+max_tokens = 16384  # tokens per forward pass of whole proteins
+edit_max_tokens = 131072  # tokens per forward pass of the edited copies
+matmul_precision = "highest"  # full fp32
