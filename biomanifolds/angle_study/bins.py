@@ -2,7 +2,13 @@
 
 Bins of width 1: helix face (-180, 180] degrees -> bins 0..359 (bin k: [k - 180, k - 179)), pLDDT [0, 100] -> bins 0..100.
 The sums and counts of the residual stream per bin are computed in the forward pass; no embeddings are saved.
+
+The harmonic fit h ~ a + b cos(theta) + c sin(theta) is the encoder of the helix face angle: ordinary least squares of h on
+(cos theta, sin theta) over the single train helix residues (linear_fits.fit_ols). The forward pass writes the residual stream of
+these residues to temporary files; only the coefficients are kept (train_helix_face_encoder_L{layer}.npz).
 """
+
+import shutil
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,6 +17,7 @@ import torch
 from tqdm.auto import tqdm
 
 from biomanifolds import plots
+from biomanifolds.angle_study import linear_fits
 from biomanifolds.angle_study.figures import save
 from biomanifolds.datasets import swissprot
 from biomanifolds.labels import af2_structure_labels, sequence_labels, swissprot_labels
@@ -30,14 +37,23 @@ def row_bins(rows):
     return {
         "helix_face": ((row_labels["helix_face"].floor() + 180) % 360).fill_null(-1).cast(pl.Int64).to_numpy(),
         "plddt": row_labels["plddt"].floor().fill_null(-1).cast(pl.Int64).to_numpy(),
+        "helix_face_degrees": row_labels["helix_face"].to_numpy(),  # the angle itself; NaN: no value
     }
 
 
-def accumulate(model, proteins, layers, max_tokens):
+def accumulate(model, proteins, layers, max_tokens, encoder_scratch=None):
     """Sums and counts of the residual stream per bin, {(label, layer): (sums (bins, hidden), counts (bins,))},
-    for the residues in `positions` of every protein (accession, sequence, positions)."""
+    for the residues in `positions` of every protein (accession, sequence, positions).
+    With encoder_scratch (a directory): also the encoder of the helix face angle of each layer, {layer: fit of linear_fits.fit_ols},
+    from the residual stream of the helix residues, which is held in temporary files in that directory during the pass."""
     rows = proteins.select("accession", i="positions").explode("i")
     bins = row_bins(rows)
+    if encoder_scratch is not None:
+        is_helix = bins["helix_face"] >= 0
+        helix_row = np.cumsum(is_helix) - 1  # row of each helix residue in the temporary files
+        encoder_scratch.mkdir(parents=True, exist_ok=True)
+        helix_h = {layer: np.lib.format.open_memmap(encoder_scratch / f"L{layer}.npy", mode="w+", dtype=np.float16, shape=(int(is_helix.sum()), model.hidden_size))
+                   for layer in layers}
     starts = np.r_[0, np.cumsum(proteins["positions"].list.len().to_numpy().astype(np.int64))]  # rows of protein j: starts[j] .. starts[j + 1]
     sums = {(label, layer): torch.zeros(spec["bins"], model.hidden_size, dtype=torch.float64, device=model.device)
             for label, spec in LABELS.items() for layer in layers}
@@ -62,13 +78,26 @@ def accumulate(model, proteins, layers, max_tokens):
         token_index = torch.tensor(np.concatenate([np.asarray(positions[j]) + model.offset for j in batch]), device=model.device)
         for layer in layers:
             h = hidden[layer][batch_index, token_index].double()  # (rows of the batch, hidden)
+            if encoder_scratch is not None:
+                helix_h[layer][helix_row[rows_b[is_helix[rows_b]]]] = h[torch.tensor(is_helix[rows_b], device=model.device)].half().cpu().numpy()
             for label in LABELS:
                 b = bins[label][rows_b]
                 keep = b >= 0
                 if keep.any():
                     sums[label, layer].index_add_(0, torch.tensor(b[keep], device=model.device), h[torch.tensor(keep, device=model.device)])
                     counts[label, layer] += np.bincount(b[keep], minlength=len(counts[label, layer]))
-    return {key: (sums[key].cpu().numpy(), counts[key]) for key in sums}
+    results = {key: (sums[key].cpu().numpy(), counts[key]) for key in sums}
+    if encoder_scratch is None:
+        return results
+    radians = np.deg2rad(bins["helix_face_degrees"][is_helix])
+    cos_sin = np.column_stack([np.cos(radians), np.sin(radians)])  # (helix residues, 2)
+    encoders = {}
+    for layer in layers:
+        helix_h[layer].flush()
+        encoders[layer] = linear_fits.fit_ols(cos_sin, helix_h[layer])  # (cos, sin) -> h
+    del helix_h
+    shutil.rmtree(encoder_scratch)
+    return results, encoders
 
 
 def bin_means(sums, counts, first_value, width, min_count):
@@ -89,9 +118,10 @@ def pca_axes(means, reference=None):
     return {"center": center, "components": components, "explained": (s**2 / (s**2).sum())[:6]}
 
 
-def harmonic_fits(sums, counts):
+def harmonic_fits(sums, counts, encoder=None):
     """Helix face: mean per 1-degree bin, global mean, and the linear [1, theta] and harmonic [1, cos, sin] least-squares fits
-    of the bin means, weighted by the residues per bin; and the weighted R^2 of the two fits (notebook 3)."""
+    of the bin means, weighted by the residues per bin; and the weighted R^2 of the two fits on the bin means (notebook 3).
+    With encoder (the fit of (cos, sin) -> h on the single residues, from accumulate): the harmonic fit is that encoder, rows a, b, c."""
     theta = np.deg2rad(np.arange(360) - 179.5)  # centre of each 1-degree bin, in radians
     filled = counts > 0
     means = np.zeros_like(sums)
@@ -101,6 +131,8 @@ def harmonic_fits(sums, counts):
     fits = {"bin_means": means, "global_mean": global_mean}
     for name, X in [("linear", np.column_stack([np.ones(360), theta])), ("harmonic", np.column_stack([np.ones(360), np.cos(theta), np.sin(theta)]))]:
         fits[name] = np.linalg.lstsq(X * weights, means * weights, rcond=None)[0]
+    if encoder is not None:
+        fits["harmonic"] = np.vstack([encoder["intercept"], encoder["coefficients"]])  # (3, hidden): a, b, c
     total = (counts[:, None] * (means - global_mean) ** 2).sum()
     r2 = {name: 1 - (counts[:, None] * (means - X @ fits[name]) ** 2).sum() / total
           for name, X in [("linear", np.column_stack([np.ones(360), theta])), ("harmonic", np.column_stack([np.ones(360), np.cos(theta), np.sin(theta)]))]}
@@ -114,16 +146,25 @@ def run(config, model, sizes, train, test, out):
     directory.mkdir(parents=True, exist_ok=True)
     layers = config["layers"]
 
-    # sums and counts per bin, saved so that they are only computed once
+    # sums and counts per bin, and the encoder of the helix face angle (train), saved so that they are only computed once
     data = {}
+    encoder_paths = {layer: directory / f"train_helix_face_encoder_L{layer}.npz" for layer in layers}
     for split, proteins in [("train", train), ("test", test)]:
         paths = {(label, layer): (directory / f"{split}_{label}_sums_L{layer}.npy", directory / f"{split}_{label}_counts_L{layer}.npy")
                  for label in LABELS for layer in layers}
-        if not all(s.exists() and c.exists() for s, c in paths.values()):
+        need_bins = not all(s.exists() and c.exists() for s, c in paths.values())
+        need_encoder = split == "train" and not all(path.exists() for path in encoder_paths.values())
+        if need_bins or need_encoder:
             print(f"bins: {split}, {len(proteins):,} proteins, {proteins['positions'].list.len().sum():,} residues", flush=True)
-            for key, (s, c) in accumulate(model(), proteins, layers, config["max_tokens"]).items():
-                np.save(paths[key][0], s)
-                np.save(paths[key][1], c)
+            results = accumulate(model(), proteins, layers, config["max_tokens"], directory / "encoder_scratch" if need_encoder else None)
+            if need_encoder:
+                results, encoders = results
+                for layer, encoder in encoders.items():
+                    np.savez(encoder_paths[layer], **encoder)
+            if need_bins:  # bin sums that exist are kept: a new pass is not bit-identical on other hardware
+                for key, (s, c) in results.items():
+                    np.save(paths[key][0], s)
+                    np.save(paths[key][1], c)
         data[split] = {key: (np.load(s), np.load(c)) for key, (s, c) in paths.items()}
 
     # PCA of the train bin means; the test bin means on the train PCs
@@ -144,12 +185,12 @@ def run(config, model, sizes, train, test, out):
     evr = pl.DataFrame(evr)
     evr.write_parquet(directory / "pca_explained_variance.parquet")
 
-    # linear and harmonic fits of the helix-face bin means (used by the ablation and the steering)
+    # the fits of the helix face (used by the ablation and the steering): bin means, linear fit of the bin means, and the encoder
     r2 = []
     for layer in sorted(set(layers) | set(config["ablation_layers"]) | {config["steering_layer"]}):
         if ("helix_face", layer) not in data["train"]:
             raise ValueError(f"layer {layer} of ablation_layers or steering_layer is not in layers")
-        fits, fit_r2 = harmonic_fits(*data["train"]["helix_face", layer])
+        fits, fit_r2 = harmonic_fits(*data["train"]["helix_face", layer], encoder=dict(np.load(encoder_paths[layer])))
         np.savez(directory / f"fits_L{layer}.npz", **fits)
         r2 += [{"layer": layer, "fit": name, "r2": float(value)} for name, value in fit_r2.items()]
     r2 = pl.DataFrame(r2)

@@ -72,11 +72,17 @@ class Esm2:
         return self.model.esm.embeddings(input_ids=input_ids, attention_mask=torch.ones_like(input_ids))
 
     @torch.no_grad()
-    def run(self, h, start, end):
-        """Blocks start+1 .. end on the residual stream h (batch, tokens, hidden), unpadded."""
+    def run(self, h, start_layer, end_layer, attention_mask=None):
+        """
+        Run a part of the transformer with a user-specified residual stream activation:
+        Blocks with indexes `start_layer` +1 up to `end_layer` are run
+        h: residual stream activation to be injected at `start_layer`. This allows steering.
+        attention_mask: optional additive mask (batch or 1, 1, tokens, tokens), e.g. finfo.min to cut a query from a key.
+        Outputs: residual stream activation h at layer `end_layer`
+        """
         rotary = self.model.esm.rotary_embeddings(h, torch.arange(h.shape[1], device=h.device)[None])  # rotary position embeddings
-        for block in self.model.esm.encoder.layer[start:end]:
-            h = block(h, position_embeddings=rotary)
+        for block in self.model.esm.encoder.layer[start_layer:end_layer]:
+            h = block(h, attention_mask=attention_mask, position_embeddings=rotary)
         return h
 
     @torch.no_grad()
